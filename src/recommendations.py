@@ -110,8 +110,43 @@ class InsertRecordHandler(BaseHandler):
 
         if missing_parameters:
             raise MissingParametersError(missing_parameters)
+        # TODO Show meaningful error in `_key` already exists, probably
+        # status 409 (at least ArangoDB uses it).
         self.collections[collection_name].insert(new_document)
         resp.status = falcon.HTTP_201
+
+
+class GetRecommendationsHandler(BaseHandler):
+    SUPPORTED_RECOMMENDATION_STRATEGIES = []
+
+    @log_and_supress_exception
+    def on_get(self, req, resp, customer_id, recommendations_strategy):
+        # TODO Remove "populate attributes" from here.
+        self.initialize_db_connection_and_populate_attributes()
+        try:
+            strategy_method = getattr(
+                self,
+                'get_{}_recommendations'.format(
+                    recommendations_strategy))
+        except AttributeError:
+            resp.status = falcon.HTTP_400
+            resp.body = 'Recommendations strategy "{}" not implemented'.format(
+                recommendations_strategy)
+        else:
+            products = strategy_method(customer_id)
+            resp.body = json.dumps(products)
+
+    def get_collaborative_filtering_recommendations(self, customer_id):
+        """Return recommendations based on collaborative filtering.
+
+        :raises OSError: Unable to open file with the required AQL
+            request.
+        """
+        with open('collaborative.aql') as f:
+            query = "LET requested_user = 'customers/{}'\n{}".format(
+                customer_id, f.read())
+        cursor = self.db.aql.execute(query)
+        return [product['key'] for product in cursor]
 
 
 # TODO Request rate limiter like
@@ -120,4 +155,9 @@ class InsertRecordHandler(BaseHandler):
 
 # TODO Authentication.
 api = falcon.API()
+# TODO Maybe use PUT and receive parameters in URL, at least for
+# vertices.
 api.add_route('/{collection_name}', InsertRecordHandler())
+api.add_route(
+    '/customers/{customer_id}/recommendations/{recommendations_strategy}',
+    GetRecommendationsHandler())
