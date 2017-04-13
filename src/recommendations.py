@@ -144,9 +144,15 @@ class GetRecommendationsHandler(BaseHandler):
         :raises OSError: Unable to open file with the required AQL
             request.
         """
+        select_products_to_exclude, filter_clause = \
+            self.get_exclusion_subquery_and_filter_clause(customer_id, params)
         with open('collaborative.aql') as f:
-            query = "LET requested_customer = 'customers/{}'\n{}".format(
-                customer_id, f.read())
+            query_template = f.read()
+        query = query_template.format(
+            requested_customer_setter="LET requested_customer = 'customers/{}'"
+            .format(customer_id),
+            select_products_to_exclude=select_products_to_exclude,
+            filter_out_products_clause=filter_clause)
         cursor = self.db.aql.execute(query)
         return [product['key'] for product in cursor]
 
@@ -175,7 +181,7 @@ class GetRecommendationsHandler(BaseHandler):
                 ('include_viewed', 'viewings'),
                 ('include_commented', 'commentings'),
                 ('include_bought', 'buyings'))
-            if params.get(param_name, "true").lower() != "true"]
+            if params.get(param_name, "true").lower() == "false"]
         if collections_for_exclusion_by:
             select_products_to_exclude += '''
             LET products_to_exclude = (

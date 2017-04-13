@@ -1,3 +1,5 @@
+{requested_customer_setter}
+{select_products_to_exclude}
 LET products_requested_customer_viewed = (
     FOR product IN OUTBOUND requested_customer viewings
     RETURN product)
@@ -9,30 +11,28 @@ LET customers_which_viewed_same_products = (
 LET products_those_customers_viewed = (
     FOR customer in customers_which_viewed_same_products
         FOR product in OUTBOUND customer viewings
-            // Should be optional or just lower the weight.
-            FILTER product NOT IN products_requested_customer_viewed 
+            {filter_out_products_clause}
             COLLECT p = product INTO viewings_by_product
             LET viewings_by_product_count = LENGTH(viewings_by_product)
             SORT viewings_by_product_count DESC
-            RETURN {key: p._key, viewings_count: viewings_by_product_count})
+            RETURN {{key: p._key, viewings_count: viewings_by_product_count}})
 LET products_those_customers_commented = (
     FOR customer in customers_which_viewed_same_products
         FOR product in OUTBOUND customer commentings
-            // Should be optional or just lower the weight.
-            // It is assumed that all commented products where also viewed by the commenter.
-            FILTER product NOT IN products_requested_customer_viewed 
+            {filter_out_products_clause}
             COLLECT p = product INTO comments_by_product
             LET comments_by_product_count = LENGTH(comments_by_product)
             SORT comments_by_product_count DESC
-            RETURN {key: p._key, comments_count: comments_by_product_count})
+            RETURN {{key: p._key, comments_count: comments_by_product_count}})
 LET products = (
     FOR product IN APPEND(
     products_those_customers_viewed,
     products_those_customers_commented)
         COLLECT key = product.key INTO iteractions_by_product
         SORT LENGTH(iteractions_by_product) DESC
-        RETURN {key,
-                viewings_count: SUM(iteractions_by_product[*].product.viewings_count),
-                comments_count: SUM(iteractions_by_product[*].product.comments_count)})
+        RETURN {{
+            key,
+            viewings_count: SUM(iteractions_by_product[*].product.viewings_count),
+            comments_count: SUM(iteractions_by_product[*].product.comments_count)}})
 FOR product IN products
     RETURN product
