@@ -118,6 +118,7 @@ class InsertRecordHandler(BaseHandler):
 
 class GetRecommendationsHandler(BaseHandler):
     SUPPORTED_RECOMMENDATION_STRATEGIES = []
+    DEFAULT_MAX_COUNT = 5
 
     @log_and_supress_exception
     def on_get(self, req, resp, customer_id, recommendations_strategy):
@@ -130,23 +131,59 @@ class GetRecommendationsHandler(BaseHandler):
                     recommendations_strategy))
         except AttributeError:
             resp.status = falcon.HTTP_400
+            # TODO Output all errrors in JSON.
             resp.body = 'Recommendations strategy "{}" not implemented'.format(
                 recommendations_strategy)
         else:
-            products = strategy_method(customer_id)
+            products = strategy_method(customer_id, req.params)
             resp.body = json.dumps(products)
 
-    def get_collaborative_filtering_recommendations(self, customer_id):
+    def get_collaborative_filtering_recommendations(self, customer_id, params):
         """Return recommendations based on collaborative filtering.
 
         :raises OSError: Unable to open file with the required AQL
             request.
         """
         with open('collaborative.aql') as f:
-            query = "LET requested_user = 'customers/{}'\n{}".format(
+            query = "LET requested_customer = 'customers/{}'\n{}".format(
                 customer_id, f.read())
         cursor = self.db.aql.execute(query)
         return [product['key'] for product in cursor]
+
+    def get_random_recommendations(self, customer_id, params):
+        select_products_to_exclude = ''
+        filter_clause = ''
+        collections_for_exclusion_by = [
+            collection_name for param_name, collection_name in (
+                ('include_viewed', 'viewings'),
+                ('include_commented', 'commentings'),
+                ('include_bought', 'buyings'))
+            if params.get(param_name, "true").lower() != "true"]
+        # TODO Validate.
+        max_count = params.get('max_count', self.DEFAULT_MAX_COUNT)
+        if collections_for_exclusion_by:
+            select_products_to_exclude += '''
+            LET products_to_exclude = (
+                FOR product IN OUTBOUND
+                'customers/{requested_customer_id}'
+                {collections_for_exclusion_by}
+                RETURN product)
+            '''.format(requested_customer_id=customer_id,
+                       collections_for_exclusion_by=" ".join(
+                           collections_for_exclusion_by))
+            filter_clause = "FILTER product NOT IN products_to_exclude"
+        query = '''
+        {select_products_to_exclude}
+        FOR product IN products
+            {filter}
+            SORT RAND()
+            LIMIT {max_count}
+            RETURN product._key
+        '''.format(select_products_to_exclude=select_products_to_exclude,
+                   filter=filter_clause, max_count=max_count)
+        print(query)
+        cursor = self.db.aql.execute(query)
+        return list(cursor)
 
 
 # TODO Request rate limiter like
