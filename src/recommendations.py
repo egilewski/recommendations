@@ -151,27 +151,10 @@ class GetRecommendationsHandler(BaseHandler):
         return [product['key'] for product in cursor]
 
     def get_random_recommendations(self, customer_id, params):
-        select_products_to_exclude = ''
-        filter_clause = ''
-        collections_for_exclusion_by = [
-            collection_name for param_name, collection_name in (
-                ('include_viewed', 'viewings'),
-                ('include_commented', 'commentings'),
-                ('include_bought', 'buyings'))
-            if params.get(param_name, "true").lower() != "true"]
         # TODO Validate.
         max_count = params.get('max_count', self.DEFAULT_MAX_COUNT)
-        if collections_for_exclusion_by:
-            select_products_to_exclude += '''
-            LET products_to_exclude = (
-                FOR product IN OUTBOUND
-                'customers/{requested_customer_id}'
-                {collections_for_exclusion_by}
-                RETURN product)
-            '''.format(requested_customer_id=customer_id,
-                       collections_for_exclusion_by=" ".join(
-                           collections_for_exclusion_by))
-            filter_clause = "FILTER product NOT IN products_to_exclude"
+        select_products_to_exclude, filter_clause = \
+            self.get_exclusion_subquery_and_filter_clause(customer_id, params)
         query = '''
         {select_products_to_exclude}
         FOR product IN products
@@ -181,9 +164,30 @@ class GetRecommendationsHandler(BaseHandler):
             RETURN product._key
         '''.format(select_products_to_exclude=select_products_to_exclude,
                    filter=filter_clause, max_count=max_count)
-        print(query)
         cursor = self.db.aql.execute(query)
         return list(cursor)
+
+    def get_exclusion_subquery_and_filter_clause(self, customer_id, params):
+        select_products_to_exclude = ''
+        filter_clause = ''
+        collections_for_exclusion_by = [
+            collection_name for param_name, collection_name in (
+                ('include_viewed', 'viewings'),
+                ('include_commented', 'commentings'),
+                ('include_bought', 'buyings'))
+            if params.get(param_name, "true").lower() != "true"]
+        if collections_for_exclusion_by:
+            select_products_to_exclude += '''
+            LET products_to_exclude = (
+                FOR product IN OUTBOUND
+                'customers/{requested_customer_id}'
+                {collections_for_exclusion_by}
+                RETURN product)
+            '''.format(requested_customer_id=customer_id,
+                       collections_for_exclusion_by=", ".join(
+                           collections_for_exclusion_by))
+            filter_clause = "FILTER product NOT IN products_to_exclude"
+        return select_products_to_exclude, filter_clause
 
 
 # TODO Request rate limiter like
