@@ -5,10 +5,11 @@ services:
     ports:
       - "8529:8529"
     environment:
-      - ARANGO_NO_AUTH=1
+      - ARANGO_ROOT_PASSWORD=4450c00e19eaa8428464ef3c36cfae5adc3d301e7333d254220eb615cdcb3d7e
+    volumes:
+      - arangodb:/var/lib/arangodb
   nginx:
-    image: nginx:latest
-    container_name: ng01
+    image: nginx
     ports:
       - "8000:8000"
     volumes:
@@ -18,7 +19,6 @@ services:
       - web
   web:
     build: .
-    container_name: fl01
     command: bash -c "gunicorn --chdir /src/ -w 2 -b 0.0.0.0:8080 recommendations:api"
     depends_on:
       - arangodb
@@ -28,3 +28,5 @@ services:
       - ./src:/src
     links:
       - arangodb
+volumes:
+  arangodb:
