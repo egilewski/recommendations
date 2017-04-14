@@ -1,13 +1,9 @@
-import sys
-import traceback
 import json
-import pprint
 import functools
 import time
+import logging
+
 import falcon
-# import requests
-# import logging
-# import os
 import arango
 
 
@@ -17,7 +13,7 @@ def log_and_supress_exception(f):
         try:
             return f(self, req, resp, **kwargs)
         except:
-            pprint.pprint("".join(traceback.format_exception(*sys.exc_info())))
+            logging.exception("Unhandled exception")
             raise falcon.HTTPError(falcon.HTTP_500)
     return wrapper
 
@@ -204,7 +200,6 @@ class GetRecommendationsHandler(BaseHandler):
             '''.format(select_products_to_exclude=select_products_to_exclude,
                        counter_name="{}_count".format(params['mode']),
                        filter=filter_clause, max_count=max_count)
-        print(query)
         cursor = self.db.aql.execute(query)
         return list(cursor)
 
