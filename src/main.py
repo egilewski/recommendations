@@ -1,3 +1,4 @@
+"""Main Falcon handlers of the recommendations app."""
 import json
 import functools
 import time
@@ -7,7 +8,16 @@ import falcon
 import arango
 
 
-def log_and_supress_exception(f):
+# TODO There's probably a more Falconic way to do this.
+def log_and_supress_exceptions(f):
+    """Decorator that logs unhandled exceptions and return HTTP 500.
+
+    Usage of thie on HTTP handler methods prevents the web app from
+    crashing.
+
+    Has to be further from the function being wrapped than decorators
+    that can handle exceptions in more meaningful way.
+    """
     @functools.wraps(f)
     def wrapper(self, req, resp, **kwargs):
         try:
@@ -18,7 +28,12 @@ def log_and_supress_exception(f):
     return wrapper
 
 
-def notify_user_on_missing_parameters(f):
+def handle_MissingOrInvalidParametersError(f):
+    """Decorator that handles `MissingOrInvalidParametersError`.
+
+    Return to user notifications that the parameters specified in the
+    exception are missing and/or invalid.
+    """
     @functools.wraps(f)
     def wrapper(self, req, resp, **kwargs):
         try:
@@ -38,14 +53,39 @@ def notify_user_on_missing_parameters(f):
 
 
 class MissingOrInvalidParametersError(BaseException):
+
+    """Exception for reporting missing and/or invalid parameters."""
+
     def __init__(self, missing_parameters=None, invalid_parameters=None, *args,
                  **kwargs):
+        """Save passed missing and invalid parameters for later use.
+
+        :param list(str)|None missing_parameters: Parameters that
+            weren't provided by the user, or were empty.
+        :param list(str)|None invalid_parameters: Parameters that were
+            provided by the user, but had invalid values.
+
+        Other positional and keyword parameters are passed to
+        `super().__init__`.
+        """
         super().__init__(*args, **kwargs)
         self.missing_parameters = missing_parameters
         self.invalid_parameters = invalid_parameters
 
 
-class BaseHandler(object):
+class BaseResource():
+
+    """Base class for Falcon resources.
+
+    Provides some basic app-wide constants.
+
+    Upon instantiation creates lazy connection to the database:
+    `self.db_client`.
+
+    Provides method for initializing the database:
+    `self.initialize_db_and_set_related_attributes`.
+    """
+
     DATABASE_NAME = 'customers_products_interactions'
     FROM_COLLECTION = 'customers'
     TO_COLLECTION = 'products'
@@ -58,11 +98,18 @@ class BaseHandler(object):
     }
 
     def __init__(self, *args, **kwargs):
+        """Create lazy connection to the database: `self.db_client`.
+
+        Also initialize some attributes.
+
+        Other positional and keyword parameters are passed to
+        `super().__init__`.
+        """
         super().__init__(*args, **kwargs)
         # Lazy. An eager one would have caused an exception, as ArangoDB
         # is starting at the same time, and much more slower than
         # gunicorn+falcon.
-        self.client = arango.ArangoClient(
+        self.db_client = arango.ArangoClient(
             protocol='http',
             host='arangodb',
             port=8529,
@@ -73,11 +120,21 @@ class BaseHandler(object):
         self.db = None
         self.collections = {}
 
-    def initialize_db_connection_and_populate_attributes(self):
+    def initialize_db_and_set_related_attributes(self):
+        """Ensure the DB is initialized, and set DB-related attributes.
+
+        `self.db_client` created in `self__init__` is lazy, this method
+        actually initialized the connection.
+
+        Attributes `self.db` with `arango.database.Database` object and
+        `self.initialize_db_and_set_related_attributes` with list of
+        `arango.collections.Collection` objects for each documents
+        (vertices) and edges collections the app uses.
+        """
         try:
-            self.db = self.client.create_database(self.DATABASE_NAME)
+            self.db = self.db_client.create_database(self.DATABASE_NAME)
         except arango.exceptions.DatabaseCreateError:
-            self.db = self.client.database(self.DATABASE_NAME)
+            self.db = self.db_client.database(self.DATABASE_NAME)
         for name, is_edge in self.COLLECTION_NAMES2IS_EDGES.items():
             try:
                 self.collections[name] = self.db.create_collection(
@@ -86,12 +143,27 @@ class BaseHandler(object):
                 self.collections[name] = self.db.collection(name)
 
 
-class InsertRecordHandler(BaseHandler):
-    @log_and_supress_exception
-    @notify_user_on_missing_parameters
+class InsertRecordResource(BaseResource):
+
+    """Falcon resource for inserting vertices and edges into DB."""
+
+    @log_and_supress_exceptions
+    @handle_MissingOrInvalidParametersError
     def on_post(self, req, resp, collection_name):
+        """Responder for inserting a new record into a collection.
+
+        :param falcon.Request req: Request object. In it's attribute
+            `stream` (file-like object) there should be a JSON dict with
+            keys "key" for a vertices collection (identified by
+            `collection_name`), or "from" and "to" for edges collection.
+        :param falcon.Response resp: Response object.
+        :param str collection_name: Name of the collection to insert a
+            new record (document) into.
+        :raises MissingOrInvalidParametersError: If some parameters in
+            `req.stream` were missing or invalid.
+        """
         # TODO Move it somewhere DRY.
-        self.initialize_db_connection_and_populate_attributes()
+        self.initialize_db_and_set_related_attributes()
         if collection_name not in self.collections:
             resp.status = falcon.HTTP_400
             resp.body = "Bad collection name: {}".format(collection_name)
@@ -133,61 +205,97 @@ class InsertRecordHandler(BaseHandler):
         resp.status = falcon.HTTP_201
 
 
-class GetRecommendationsHandler(BaseHandler):
+class GetRecommendationsResource(BaseResource):
+
+    """Falcon resource for getting recommendations."""
+
     SUPPORTED_RECOMMENDATION_STRATEGIES = []
     DEFAULT_MAX_COUNT = 5
 
-    @log_and_supress_exception
-    @notify_user_on_missing_parameters
-    def on_get(self, req, resp, customer_id, recommendations_strategy,
-               mode=None):
+    @log_and_supress_exceptions
+    @handle_MissingOrInvalidParametersError
+    def on_get(self, req, resp, customer_key, recommendation_strategy):
+        """Responder for getting recommendations.
+
+        :param falcon.Request req: Request object. In it's attribute
+            `params` (dict) there should be keys required for the chosen
+            recommendation strategy.
+        :param falcon.Response resp: Response object.
+        :param str customer_key: DB key of the customer for whom to
+            provide recommendations. Some recommendation strategies may
+            ignore it.
+        :param str recommendation_strategy: Name of the recommendation
+            strategy to use.
+        :raises MissingOrInvalidParametersError: If some parameters in
+            `req.stream` were missing or invalid.
+        """
         # TODO Remove "populate attributes" from here.
-        self.initialize_db_connection_and_populate_attributes()
+        self.initialize_db_and_set_related_attributes()
         try:
             strategy_method = getattr(
                 self,
                 'get_{}_recommendations'.format(
-                    recommendations_strategy))
+                    recommendation_strategy))
         except AttributeError:
             resp.status = falcon.HTTP_400
             # TODO Output all errrors in JSON.
-            resp.body = 'Recommendations strategy "{}" not implemented'.format(
-                recommendations_strategy)
+            resp.body = 'Recommendation strategy "{}" not implemented'.format(
+                recommendation_strategy)
         else:
-            products = strategy_method(customer_id, req.params)
+            products = strategy_method(customer_key, req.params)
             resp.body = json.dumps(products)
 
-    def get_collaborative_filtering_recommendations(self, customer_id, params):
+    def get_collaborative_filtering_recommendations(self, customer_key,
+                                                    params):
         """Return recommendations based on collaborative filtering.
 
+        :param str customer_key: DB key of the customer for whom to
+            provide recommendations.
+        :param dict params: Parameters. Used ones are:
+            "max_count": Maximum number of products to return.
+            For other used ones see
+            `self.get_exclusion_subquery_and_filter_clause`.
+        :return: Product keys.
+        :rtype: list(str)
         :raises OSError: Unable to open file with the required AQL
             request.
         """
         select_products_to_exclude, filter_clause = \
-            self.get_exclusion_subquery_and_filter_clause(customer_id, params)
+            self.get_exclusion_subquery_and_filter_clause(customer_key, params)
         with open('collaborative.aql') as f:
             query_template = f.read()
         query = query_template.format(
             requested_customer_setter="LET requested_customer = 'customers/{}'"
-            .format(customer_id),
+            .format(customer_key),
             select_products_to_exclude=select_products_to_exclude,
             filter_out_products_clause=filter_clause)
         cursor = self.db.aql.execute(query)
         return [product['key'] for product in cursor]
 
-    def get_top_recommendations(self, customer_id, params):
-        collection_name = params.get('mode')
+    def get_top_recommendations(self, customer_key, params):
+        """Return products with most connections of a certain type.
+
+        :param str customer_key: DB key of the customer for whom to
+            provide recommendations.
+        :param dict params: Parameters. Used ones are:
+            "type": a name of an edges collection to to return top for.
+            "max_count": Maximum number of products to return.
+            For other used ones see
+            `self.get_exclusion_subquery_and_filter_clause`.
+        :return: Product keys.
+        :rtype: list(str)
+        :raises OSError: Unable to open file with the required AQL
+            request.
+        """
+        collection_name = params.get('type')
         if not collection_name:
-            raise MissingOrInvalidParametersError(missing_parameters=['mode'])
-        # TODO Preferably also forbid to use collection that is filtered
-        # out. Currently that will lead to empty result, which isn't a
-        # bug, but is confusing.
-        if collection_name not in self.collections:
-            raise MissingOrInvalidParametersError(invalid_parameters=['mode'])
+            raise MissingOrInvalidParametersError(missing_parameters=['type'])
+        if not self.COLLECTION_NAMES2IS_EDGES.get(collection_name, False):
+            raise MissingOrInvalidParametersError(invalid_parameters=['type'])
         # TODO Validate.
         max_count = params.get('max_count', self.DEFAULT_MAX_COUNT)
         select_products_to_exclude, filter_clause = \
-            self.get_exclusion_subquery_and_filter_clause(customer_id, params)
+            self.get_exclusion_subquery_and_filter_clause(customer_key, params)
         query = '''
             {select_products_to_exclude}
             FOR product IN products
@@ -198,16 +306,29 @@ class GetRecommendationsHandler(BaseHandler):
                 LIMIT {max_count}
                 RETURN product._key
             '''.format(select_products_to_exclude=select_products_to_exclude,
-                       counter_name="{}_count".format(params['mode']),
+                       counter_name="{}_count".format(params['type']),
                        filter=filter_clause, max_count=max_count)
         cursor = self.db.aql.execute(query)
         return list(cursor)
 
-    def get_random_recommendations(self, customer_id, params):
+    def get_random_recommendations(self, customer_key, params):
+        """Return random products.
+
+        :param str customer_key: DB key of the customer for whom to
+            provide recommendations.
+        :param dict params: Parameters. Used ones are:
+            "max_count": Maximum number of products to return.
+            For other used ones see
+            `self.get_exclusion_subquery_and_filter_clause`.
+        :return: Product keys.
+        :rtype: list(str)
+        :raises OSError: Unable to open file with the required AQL
+            request.
+        """
         # TODO Validate.
         max_count = params.get('max_count', self.DEFAULT_MAX_COUNT)
         select_products_to_exclude, filter_clause = \
-            self.get_exclusion_subquery_and_filter_clause(customer_id, params)
+            self.get_exclusion_subquery_and_filter_clause(customer_key, params)
         query = '''
             {select_products_to_exclude}
             FOR product IN products
@@ -221,11 +342,30 @@ class GetRecommendationsHandler(BaseHandler):
         cursor = self.db.aql.execute(query)
         return list(cursor)
 
-    def get_exclusion_subquery_and_filter_clause(self, customer_id, params):
+    def get_exclusion_subquery_and_filter_clause(self, customer_key, params):
+        """Return AQL fragments filtering out products customer knows.
+
+        Allows filtering out products the customer already interacted
+        with, by the provided types of interactions.
+
+        :param str customer_key: DB key of the customer for whom to
+            provide recommendations.
+        :param dict params: Parameters. Missing ones are assumed to be
+            true. Used ones are:
+            "include_viewed": Include products user already viewed.
+            "include_commented": Include products user already
+            commented.
+            "include_bought": Include products user already bought.
+        :rtype tuple(str, str):
+        :return: "LET" AQL fragment that selects products to ignore, and
+            "FILTER" AQL clause that filters out those products.
+        """
         # TODO Include commented and bought unless excluded even if they
         # are also viewed (which is most likely the case).
         select_products_to_exclude = ''
         filter_clause = ''
+        # TODO Get rid of the mapping, or at least extract it and place
+        # where collection names are defined.
         collections_for_exclusion_by = [
             collection_name for param_name, collection_name in (
                 ('include_viewed', 'viewings'),
@@ -236,12 +376,12 @@ class GetRecommendationsHandler(BaseHandler):
             select_products_to_exclude += '''
                 LET products_to_exclude = (
                     FOR product IN OUTBOUND
-                    'customers/{requested_customer_id}'
+                    'customers/{requested_customer_key}'
                     {collections_for_exclusion_by}
                     RETURN product)
-                '''.format(requested_customer_id=customer_id,
-                            collections_for_exclusion_by=", ".join(
-                                collections_for_exclusion_by))
+                '''.format(requested_customer_key=customer_key,
+                           collections_for_exclusion_by=", ".join(
+                               collections_for_exclusion_by))
             filter_clause = "FILTER product NOT IN products_to_exclude"
         return select_products_to_exclude, filter_clause
 
@@ -250,16 +390,16 @@ class GetRecommendationsHandler(BaseHandler):
 # http://www.giantflyingsaucer.com/blog/?p=5910
 
 
-# TODO Authentication.
+# TODO Authentication, HTTPS.
 api = falcon.API()
 # TODO Maybe use PUT and receive parameters in URL, at least for
 # vertices.
-api.add_route('/{collection_name}', InsertRecordHandler())
+api.add_route('/{collection_name}', InsertRecordResource())
 api.add_route(
-    '/customers/{customer_id}/recommendations/{recommendations_strategy}',
-    GetRecommendationsHandler())
+    '/customers/{customer_key}/recommendations/{recommendation_strategy}',
+    GetRecommendationsResource())
 # TODO Maybe later, I don't want to complicate the code now.
 # api.add_route(
-    # '/customers/{customer_id}/recommendations/{recommendations_strategy}/'
-    # '{mode}',
-    # GetRecommendationsHandler())
+#     '/customers/{customer_key}/recommendations/{recommendation_strategy}/'
+#     '{type}',
+#     GetRecommendationsResource())
