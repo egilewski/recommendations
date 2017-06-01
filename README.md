@@ -3,6 +3,15 @@ Recommendations
 
 This is a simple REST API app that stores products, customers, and relations between them, and based on that information provides recommendation of products for a specified customer.
 
+Used 3rd-party software:
+
+ - Falcon (https://falcon.readthedocs.io/), a minimalist and very fast REST API framework.
+ - ArangoDB (http://arangodb.com/), a multi-model (graph, document, and key-value) DBMS.
+ - python-arango (http://python-driver-for-arangodb.readthedocs.io/), one of the Python drivers for ArangoDB.
+ - Docker (https://docker.com), a container platform, and Docker Compose, a multi-container Docker applications manager.
+ - Gunicorn (http://gunicorn.org/), a Python WSGI HTTP server.
+ - Nginx (https://nginx.org/), an HTTP and reverse proxy server.
+
 It was written for a coding challenge and isn't meant to be used in production. Comments in Python and AQL code list features that will make it production-ready. Considering that fully-functional alternatives already exist, I probably won't be implementing them.
 
 Usage
