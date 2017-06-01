@@ -164,13 +164,13 @@ class InsertRecordResource(BaseResource):
         """
         # TODO Move it somewhere DRY.
         self.initialize_db_and_set_related_attributes()
+        missing_parameters = []
         if collection_name not in self.collections:
             resp.status = falcon.HTTP_400
             resp.body = "Bad collection name: {}".format(collection_name)
             return
 
         is_edge = self.COLLECTION_NAMES2IS_EDGES[collection_name]
-        missing_parameters = []
         req_body = json.loads(req.bounded_stream.read().decode('utf-8'))
         new_document = {}
         if is_edge:
@@ -189,9 +189,11 @@ class InsertRecordResource(BaseResource):
         if missing_parameters:
             raise MissingOrInvalidParametersError(
                 missing_parameters=missing_parameters)
-        # TODO Show meaningful error in `_key` already exists, probably
-        # status 409 (at least ArangoDB uses it).
-        self.collections[collection_name].insert(new_document)
+        try:
+            self.collections[collection_name].insert(new_document)
+        except arango.exceptions.DocumentInsertError:
+            resp.status = falcon.HTTP_409
+            return
         if is_edge:
             query = '''
                 FOR product in products
@@ -203,6 +205,55 @@ class InsertRecordResource(BaseResource):
                            counter_name="{}_count".format(collection_name))
             self.db.aql.execute(query)
         resp.status = falcon.HTTP_201
+
+
+class ModifyRecordResource(BaseResource):
+
+    """Falcon resource for modifying vertices and edges in DB."""
+
+    @log_and_supress_exceptions
+    @handle_MissingOrInvalidParametersError
+    def on_post(self, req, resp, collection_name, key, action):
+        """Responder for modifying a vertex.
+
+        :param falcon.Request req: Request object. In it's attribute
+            `stream` (file-like object) there should be a JSON dict with
+            keys "key" for a vertices collection (identified by
+            `collection_name`), or "from" and "to" for edges collection.
+        :param falcon.Response resp: Response object.
+        :param str collection_name: Name of the collection to which the
+            record belongs. Currently only "products" is a valid value.
+        :param str key: DB key of the record.
+        :param str action: modification action to perform. Supported
+            values are:
+            "deactivate": Mark the record as inactive. Inactive records
+            may affect results of queries to the DB, but won't be
+            returned.
+            "activate": Mark the record as active. Records are active by
+            default.
+        :raises MissingOrInvalidParametersError: If some parameters in
+            `req.stream` were missing or invalid.
+        """
+        # TODO Move it somewhere DRY.
+        self.initialize_db_and_set_related_attributes()
+        if collection_name not in ("products",):
+            resp.status = falcon.HTTP_400
+            resp.body = "Bad collection name: {}".format(collection_name)
+            return
+
+        if action not in ('deactivate', 'activate'):
+            raise MissingOrInvalidParametersError(
+                invalid_parameters=['action'])
+
+        update = {'active': "false"} if action == 'deactivate' \
+            else {'active': None}
+        try:
+            self.collections[collection_name].update_match(
+                {'_key': key}, update, keep_none=False)
+        except arango.exceptions.DocumentUpdateError:
+            resp.status = falcon.HTTP_404
+            return
+        resp.status = falcon.HTTP_204
 
 
 class GetRecommendationsResource(BaseResource):
@@ -222,14 +273,13 @@ class GetRecommendationsResource(BaseResource):
             recommendation strategy.
         :param falcon.Response resp: Response object.
         :param str customer_key: DB key of the customer for whom to
-            provide recommendations. Some recommendation strategies may
-            ignore it.
+            provide recommendations.
         :param str recommendation_strategy: Name of the recommendation
             strategy to use.
         :raises MissingOrInvalidParametersError: If some parameters in
             `req.stream` were missing or invalid.
         """
-        # TODO Remove "populate attributes" from here.
+        # TODO Remove "set related attributes" from here.
         self.initialize_db_and_set_related_attributes()
         try:
             strategy_method = getattr(
@@ -242,11 +292,16 @@ class GetRecommendationsResource(BaseResource):
             resp.body = 'Recommendation strategy "{}" not implemented'.format(
                 recommendation_strategy)
         else:
-            products = strategy_method(customer_key, req.params)
+            try:
+                max_count = req.params.get('max_count', self.DEFAULT_MAX_COUNT)
+            except ValueError:
+                raise MissingOrInvalidParametersError(
+                    invalid_parameters=['max_count'])
+            products = strategy_method(customer_key, req.params, max_count)
             resp.body = json.dumps(products)
 
     def get_collaborative_filtering_recommendations(self, customer_key,
-                                                    params):
+                                                    params, max_count):
         """Return recommendations based on collaborative filtering.
 
         :param str customer_key: DB key of the customer for whom to
@@ -268,11 +323,12 @@ class GetRecommendationsResource(BaseResource):
             requested_customer_setter="LET requested_customer = 'customers/{}'"
             .format(customer_key),
             select_products_to_exclude=select_products_to_exclude,
-            filter_out_products_clause=filter_clause)
+            filter_out_products_clause=filter_clause,
+            max_count=max_count)
         cursor = self.db.aql.execute(query)
         return [product['key'] for product in cursor]
 
-    def get_top_recommendations(self, customer_key, params):
+    def get_top_recommendations(self, customer_key, params, max_count):
         """Return products with most connections of a certain type.
 
         :param str customer_key: DB key of the customer for whom to
@@ -292,8 +348,6 @@ class GetRecommendationsResource(BaseResource):
             raise MissingOrInvalidParametersError(missing_parameters=['type'])
         if not self.COLLECTION_NAMES2IS_EDGES.get(collection_name, False):
             raise MissingOrInvalidParametersError(invalid_parameters=['type'])
-        # TODO Validate.
-        max_count = params.get('max_count', self.DEFAULT_MAX_COUNT)
         select_products_to_exclude, filter_clause = \
             self.get_exclusion_subquery_and_filter_clause(customer_key, params)
         query = '''
@@ -311,7 +365,7 @@ class GetRecommendationsResource(BaseResource):
         cursor = self.db.aql.execute(query)
         return list(cursor)
 
-    def get_random_recommendations(self, customer_key, params):
+    def get_random_recommendations(self, customer_key, params, max_count):
         """Return random products.
 
         :param str customer_key: DB key of the customer for whom to
@@ -325,8 +379,6 @@ class GetRecommendationsResource(BaseResource):
         :raises OSError: Unable to open file with the required AQL
             request.
         """
-        # TODO Validate.
-        max_count = params.get('max_count', self.DEFAULT_MAX_COUNT)
         select_products_to_exclude, filter_clause = \
             self.get_exclusion_subquery_and_filter_clause(customer_key, params)
         query = '''
@@ -395,6 +447,7 @@ api = falcon.API()
 # TODO Maybe use PUT and receive parameters in URL, at least for
 # vertices.
 api.add_route('/{collection_name}', InsertRecordResource())
+api.add_route('/{collection_name}/{key}/{action}', ModifyRecordResource())
 api.add_route(
     '/customers/{customer_key}/recommendations/{recommendation_strategy}',
     GetRecommendationsResource())

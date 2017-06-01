@@ -18,8 +18,10 @@ services:
     depends_on:
       - web
   web:
-    build: .
-    command: bash -c "gunicorn --chdir /src/ -w 2 -b 0.0.0.0:8080 main:api"
+    build:
+      context: .
+      dockerfile: Dockerfile_web
+    command: bash -c "gunicorn --chdir /src/ -b 0.0.0.0:8080 main:api"
     depends_on:
       - arangodb
     ports:
